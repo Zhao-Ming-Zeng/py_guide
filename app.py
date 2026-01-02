@@ -6,23 +6,20 @@ import time
 import folium
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
-from streamlit_autorefresh import st_autorefresh
 from geopy.distance import geodesic
+# ---------------------------------------------------------
+# 模型相關 (保持原樣)
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+# ---------------------------------------------------------
 
-# --- 1. 設定頁面 ---
 st.set_page_config(page_title="語音導覽", layout="wide", page_icon="🗺️")
 
-# --- 2. 自動刷新機制 ---
-# 固定 3秒 刷新一次
-refresh_count = st_autorefresh(interval=3000, key="gps_updater")
-
-# --- 3. CSS 樣式 ---
+# --- CSS ---
 st.markdown("""
 <style>
     .stButton button {
@@ -30,101 +27,90 @@ st.markdown("""
         width: 80px; height: 80px; font-size: 30px; border: 4px solid white;
         box-shadow: 0px 4px 8px rgba(0,0,0,0.3); margin: 0 auto; display: block;
     }
-    .stButton button:hover { background-color: #D62828; transform: scale(1.05); }
     div[data-testid="stVerticalBlock"] > div > div[data-testid="stButton"] > button {
         width: auto; height: auto; border-radius: 5px; font-size: 16px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. 載入資料 ---
-json_path = "data/spots.json"
-if not os.path.exists(json_path):
-    st.error(f"❌ 找不到 {json_path}")
+# --- 載入資料 ---
+if not os.path.exists("data/spots.json"):
+    st.error("❌ 找不到 data/spots.json")
     st.stop()
-else:
-    with open(json_path, "r", encoding="utf-8") as f:
-        SPOTS = json.load(f)
-
+SPOTS = json.load(open("data/spots.json", "r", encoding="utf-8"))
 TRIGGER_DIST = 150
 
-# --- 5. RAG 模型 ---
+# --- RAG ---
 @st.cache_resource
 def load_rag():
-    index_path = "faiss_index"
-    if not os.path.exists(index_path): return "MISSING_INDEX"
+    if not os.path.exists("faiss_index"): return "MISSING_INDEX"
     if "GOOGLE_API_KEY" not in st.secrets: return "MISSING_KEY"
-
     try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
-        db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-        
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            temperature=0.3, 
-            google_api_key=st.secrets["GOOGLE_API_KEY"]
-        )
-        
-        prompt = PromptTemplate.from_template(
-            "導覽員背景知識：{context}\n遊客問題：{question}\n請依據背景回答，若無資訊請說不知道。"
-        )
-        
-        chain = (
-            {"context": db.as_retriever(search_kwargs={"k": 2}), "question": RunnablePassthrough()}
-            | prompt | llm | StrOutputParser()
-        )
-        return chain
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
+        db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=st.secrets["GOOGLE_API_KEY"])
+        prompt = PromptTemplate.from_template("背景:{context}\n問題:{question}\n回答:")
+        return ({"context": db.as_retriever(search_kwargs={"k": 2}), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser())
+    except Exception as e: return str(e)
 
 qa_chain_or_error = load_rag()
 
-# --- 6. 播放器 ---
 def get_player(path):
     if not os.path.exists(path): return None
-    with open(path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
+    with open(path, "rb") as f: b64 = base64.b64encode(f.read()).decode()
     return f'<audio autoplay controls src="data:audio/mp3;base64,{b64}" style="width:100%;"></audio>'
 
-# ================== 主畫面 ==================
+# ==================================================
+# 🌟 核心修改：使用 fragment 進行局部更新
+# ==================================================
+
 st.title("🗺️ 雲科大隨身語音導覽")
 
-# --- 7. GPS 定位邏輯 (修復 TypeError) ---
+# 初始化 session state
+if 'user_pos' not in st.session_state:
+    st.session_state.user_pos = None # 預設無位置
 
-col1, col2 = st.columns([3, 1])
-with col2:
-    st.caption(f"📡 GPS 計數: {refresh_count}")
-    if st.button("手動更新"):
-        st.rerun()
-
-# 產生一個每次刷新都不一樣的 ID
-gps_id = f"gps_{refresh_count}"
-
-# 🛠️ 這裡是最重要的修改：移除所有不被支援的參數，只保留 component_key
-try:
-    # 嘗試標準用法
-    current_loc = get_geolocation(component_key=gps_id)
-except TypeError:
-    # 萬一連 component_key 都不支援，就試試看完全不帶參數 (依靠 rerun 來更新)
+# 這一塊函式每 3 秒會自己跑一次，但「不會」讓整頁重新整理
+@st.fragment(run_every=3) # 👈 這就是防閃爍的神奇指令 (需 Streamlit 1.37+)
+def update_gps_loop():
+    # 產生動態 ID
+    gps_id = f"gps_{time.time()}"
     try:
-        current_loc = get_geolocation()
+        # 這裡只會更新這個隱藏的 GPS 元件，不會影響外面的地圖
+        loc = get_geolocation(component_key=gps_id)
+        if loc:
+            lat = loc["coords"]["latitude"]
+            lon = loc["coords"]["longitude"]
+            
+            # 只有當位置真的改變，且距離超過 5 公尺才更新全局變數 (減少無謂的重繪)
+            old_pos = st.session_state.user_pos
+            if old_pos:
+                dist = geodesic(old_pos, (lat, lon)).meters
+                if dist > 5: # 門檻：移動超過 5 公尺才更新地圖
+                    st.session_state.user_pos = (lat, lon)
+                    st.rerun() # 只有真的移動了，才觸發整頁刷新更新地圖
+            else:
+                # 第一次抓到位置
+                st.session_state.user_pos = (lat, lon)
+                st.rerun()
+                
     except:
-        current_loc = None
-
-# 因為 ID (gps_id) 變了，Streamlit 會以為這是一個全新的 GPS 元件
-# 所以它會強制瀏覽器重新抓取一次位置，這樣就達到「強制刷新」的效果了
-
-loc = current_loc
-
-if loc:
-    user_lat = loc["coords"]["latitude"]
-    user_lon = loc["coords"]["longitude"]
-    user_pos = (user_lat, user_lon)
+        pass
     
-    # --- 8. 地圖顯示 ---
+    # 顯示一個小小的狀態燈，證明它活著
+    st.caption(f"📡 訊號偵測中... {int(time.time()) % 100}")
+
+# 呼叫這個局部迴圈 (它會在背景一直跑)
+update_gps_loop()
+
+# ==================================================
+# 下面是主畫面 (只有 st.session_state.user_pos 改變時才會重畫)
+# ==================================================
+
+if st.session_state.user_pos:
+    user_pos = st.session_state.user_pos
+    
+    # 計算最近景點
     m = folium.Map(location=user_pos, zoom_start=17)
     folium.Marker(user_pos, popup="我", icon=folium.Icon(color="blue", icon="user")).add_to(m)
     
@@ -134,18 +120,15 @@ if loc:
     for key, info in SPOTS.items():
         spot_pos = (info["lat"], info["lon"])
         d = geodesic(user_pos, spot_pos).meters
-        
         folium.Marker(spot_pos, popup=f"{info['name']} ({int(d)}m)", icon=folium.Icon(color="red", icon="info-sign")).add_to(m)
         folium.Circle(spot_pos, radius=TRIGGER_DIST, color="red", fill=True, fill_opacity=0.1).add_to(m)
-        
         if d < min_dist:
             min_dist = d
             nearest_key = key
 
-    with col1:
-        st_folium(m, width=700, height=350)
+    st_folium(m, width=700, height=350)
     
-    # --- 9. 觸發與互動 ---
+    # 互動區
     if nearest_key and min_dist <= TRIGGER_DIST:
         spot = SPOTS[nearest_key]
         st.success(f"📍 抵達：**{spot['name']}**")
@@ -159,7 +142,6 @@ if loc:
             path = f"data/audio/{nearest_key}_{suffix}.mp3"
             if suffix == "tw" and not os.path.exists(path):
                 path = f"data/audio/{nearest_key}_cn.mp3"
-                st.warning("⚠️ 暫無台語檔，播放中文")
             player = get_player(path)
             if player: st.markdown(player, unsafe_allow_html=True)
 
@@ -167,7 +149,7 @@ if loc:
         user_q = st.chat_input("有什麼問題想問導覽員？")
         if user_q:
             if isinstance(qa_chain_or_error, str):
-                st.error(f"系統錯誤: {qa_chain_or_error}")
+                st.error(qa_chain_or_error)
             else:
                 with st.spinner("AI 思考中..."):
                     resp = qa_chain_or_error.invoke(f"地點:{spot['name']}, 問題:{user_q}")
@@ -176,4 +158,4 @@ if loc:
         st.info(f"🚶 前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
 
 else:
-    st.warning("📡 正在取得 GPS 定位... (請等待數秒)")
+    st.warning("📡 首次定位中... 請稍候")
