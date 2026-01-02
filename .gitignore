@@ -1,0 +1,5 @@
+# 忽略 Python 編譯產生的暫存檔
+__pycache__/
+
+# 忽略敏感設定檔 (絕對不要上傳！)
+.streamlit/secrets.toml
