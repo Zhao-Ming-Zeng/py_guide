@@ -221,7 +221,7 @@ with col_info:
                         
     elif st.session_state.user_coords:
         if nearest_key:
-            st.info(f"🚶 距離最近的景點：**{SPOTS[nearest_key]['name']}**")
+            st.info(f"🚶 前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
             st.metric("剩餘距離", f"{int(min_dist - TRIGGER_DIST)} 公尺")
         else:
             st.info("附近沒有景點")
