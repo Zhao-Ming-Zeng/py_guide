@@ -12,3 +12,4 @@ folium
 streamlit-folium
 edge-tts
 yating-tts-sdk
+streamlit-autorefresh
