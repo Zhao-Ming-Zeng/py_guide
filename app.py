@@ -13,6 +13,9 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
+
+#測試
+
 # --- Streamlit 設定 ---
 st.set_page_config(
     page_title="語音導覽",
