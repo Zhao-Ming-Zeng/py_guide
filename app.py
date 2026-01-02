@@ -116,7 +116,7 @@ with col2:
 
 # 關鍵：每次 gps_key 改變，get_geolocation 就會被強制視為新的元件重新執行
 gps_component_key = "gps_" + str(st.session_state.gps_key)
-loc = get_geolocation(key=gps_component_key)
+loc = get_geolocation(component_key=gps_component_key)
 
 if loc:
     user_lat = loc["coords"]["latitude"]
