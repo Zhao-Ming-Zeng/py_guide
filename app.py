@@ -96,9 +96,9 @@ def background_gps_worker():
     
     # 顯示一個極小的狀態點，讓你知道程式還活著 (可選)
     if loc:
-        st.caption(f"🟢 訊號接收中... ({int(time.time())%100})")
+        st.caption(f"訊號接收中... ({int(time.time())%100})")
     else:
-        st.caption("🔴 搜尋訊號中...")
+        st.caption("搜尋訊號中...")
 
     # 2. 判斷是否需要更新主畫面
     if loc:
@@ -129,13 +129,13 @@ def background_gps_worker():
 # ==========================================================
 # 主介面 (Main UI)
 # ==========================================================
-st.title("🗺️ 虎科大隨身語音導覽")
+st.title("虎科大隨身語音導覽")
 
 # 1. 啟動後臺 GPS 工人 (放在側邊欄或頁面頂端，不佔空間)
 with st.sidebar:
     st.header("系統狀態")
     background_gps_worker()
-    st.info("💡 說明：為了節省流量並穩定畫面，只有當您移動超過 10 公尺時，地圖才會更新。")
+    st.info("說明：為了節省流量並穩定畫面，只有當您移動超過 10 公尺時，地圖才會更新。")
 
 # 2. 處理位置與地圖
 col_map, col_info = st.columns([3, 2])
@@ -194,7 +194,7 @@ with col_info:
         st.markdown(f"<div style='background:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:10px'>{intro}</div>", unsafe_allow_html=True)
         
         # 播放按鈕
-        if st.button("▶️ 播放導覽語音"):
+        if st.button("▶ 播放導覽語音"):
             suffix = "cn" if lang == "中文" else "tw"
             path = f"data/audio/{nearest_key}_{suffix}.mp3"
             if suffix == "tw" and not os.path.exists(path):
