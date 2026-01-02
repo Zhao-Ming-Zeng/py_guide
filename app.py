@@ -85,7 +85,7 @@ def play_audio_hidden(path):
 # 這個 fragment 會在背景每 3 秒跑一次，但「不會」刷新主頁面
 @st.fragment(run_every=3)
 def background_gps_worker():
-    # 1. 用時間戳當 ID，強制瀏覽器抓新位置
+    # 用時間戳當 ID，強制瀏覽器抓新位置
     gps_id = f"gps_{int(time.time())}"
     
     try:
@@ -129,7 +129,7 @@ def background_gps_worker():
 # ==========================================================
 # 主介面 (Main UI)
 # ==========================================================
-st.title("🗺️ 雲科大隨身語音導覽")
+st.title("🗺️ 虎科大隨身語音導覽")
 
 # 1. 啟動後臺 GPS 工人 (放在側邊欄或頁面頂端，不佔空間)
 with st.sidebar:
@@ -146,7 +146,7 @@ with col_map:
         center_pos = st.session_state.user_coords
         zoom = 17
     else:
-        center_pos = (23.694, 120.534) # 預設雲科大
+        center_pos = (23.7027602462213, 120.42951632350216) # 預設虎科大
         zoom = 15
 
     m = folium.Map(location=center_pos, zoom_start=zoom)
@@ -186,7 +186,7 @@ with col_info:
         # 更新目前景點狀態
         st.session_state.current_spot = nearest_key
         
-        st.success(f"📍 您已抵達：{spot['name']}")
+        st.success(f"您已抵達：{spot['name']}")
         
         lang = st.radio("導覽語言", ["中文", "台語"], horizontal=True)
         intro = spot["intro_cn"] if lang == "中文" else spot.get("intro_tw", "無資料")
@@ -204,7 +204,7 @@ with col_info:
         st.divider()
         
         # AI 聊天
-        st.markdown("### 🤖 導覽小幫手")
+        st.markdown("### 導覽小幫手")
         user_q = st.chat_input("有什麼問題嗎？")
         
         if user_q:
@@ -221,10 +221,9 @@ with col_info:
                         
     elif st.session_state.user_coords:
         if nearest_key:
-            st.info(f"🚶 前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
-            st.metric("剩餘距離", f"{int(min_dist - TRIGGER_DIST)} 公尺")
+            st.info(f"前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
         else:
             st.info("附近沒有景點")
     else:
-        st.warning("📡 正在等待 GPS 訊號...")
+        st.warning("正在等待 GPS 訊號...")
         st.markdown("請確認您已開啟手機 GPS，並允许瀏覽器存取位置。")
