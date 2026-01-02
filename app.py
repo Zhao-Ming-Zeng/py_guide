@@ -18,8 +18,8 @@ from langchain_core.runnables import RunnablePassthrough
 # --- 1. 設定頁面 ---
 st.set_page_config(page_title="語音導覽", layout="wide", page_icon="🗺️")
 
-# --- 2. 自動刷新機制 (您要求的固定時間) ---
-# 固定 3000 毫秒 (3秒) 刷新一次，強制更新 GPS
+# --- 2. 自動刷新機制 ---
+# 固定 3秒 刷新一次
 refresh_count = st_autorefresh(interval=3000, key="gps_updater")
 
 # --- 3. CSS 樣式 ---
@@ -46,10 +46,9 @@ else:
     with open(json_path, "r", encoding="utf-8") as f:
         SPOTS = json.load(f)
 
-# 觸發半徑 (進入範圍才播放)
 TRIGGER_DIST = 150
 
-# --- 5. RAG 模型 (依照指示：保留您原始設定，不動) ---
+# --- 5. RAG 模型 ---
 @st.cache_resource
 def load_rag():
     index_path = "faiss_index"
@@ -63,7 +62,6 @@ def load_rag():
         )
         db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         
-        # 這裡保留標準設定，若您有自己的模型參數可直接在此修改
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             temperature=0.3, 
@@ -71,7 +69,7 @@ def load_rag():
         )
         
         prompt = PromptTemplate.from_template(
-            "導覽員背景知識：{context}\n遊客問題：{question}\n請依據背景回答，若無資訊請說RAG無該內容。"
+            "導覽員背景知識：{context}\n遊客問題：{question}\n請依據背景回答，若無資訊請說不知道。"
         )
         
         chain = (
@@ -94,31 +92,31 @@ def get_player(path):
 # ================== 主畫面 ==================
 st.title("🗺️ 雲科大隨身語音導覽")
 
-# --- 7. GPS 定位邏輯 (已刪除最小距離限制) ---
+# --- 7. GPS 定位邏輯 (修復 TypeError) ---
 
 col1, col2 = st.columns([3, 1])
 with col2:
-    st.caption(f"📡 GPS 更新計數: {refresh_count}")
+    st.caption(f"📡 GPS 計數: {refresh_count}")
     if st.button("手動更新"):
         st.rerun()
 
-# 每次都用新的 Key，確保不使用 Streamlit 快取
+# 產生一個每次刷新都不一樣的 ID
 gps_id = f"gps_{refresh_count}"
 
+# 🛠️ 這裡是最重要的修改：移除所有不被支援的參數，只保留 component_key
 try:
-    # 這裡加入 maximumAge=0 強制不使用瀏覽器位置快取
-    # enableHighAccuracy=True 要求最高精準度
-    current_loc = get_geolocation(
-        component_key=gps_id,
-        enableHighAccuracy=True,
-        maximumAge=0, 
-        timeout=5000
-    )
+    # 嘗試標準用法
+    current_loc = get_geolocation(component_key=gps_id)
 except TypeError:
-    # 相容舊版參數
-    current_loc = get_geolocation(key=gps_id)
+    # 萬一連 component_key 都不支援，就試試看完全不帶參數 (依靠 rerun 來更新)
+    try:
+        current_loc = get_geolocation()
+    except:
+        current_loc = None
 
-# 只要抓到位置就直接更新，完全不判斷距離差
+# 因為 ID (gps_id) 變了，Streamlit 會以為這是一個全新的 GPS 元件
+# 所以它會強制瀏覽器重新抓取一次位置，這樣就達到「強制刷新」的效果了
+
 loc = current_loc
 
 if loc:
@@ -128,12 +126,7 @@ if loc:
     
     # --- 8. 地圖顯示 ---
     m = folium.Map(location=user_pos, zoom_start=17)
-    # 藍色點：您的位置
-    folium.Marker(
-        user_pos, 
-        popup="我", 
-        icon=folium.Icon(color="blue", icon="user")
-    ).add_to(m)
+    folium.Marker(user_pos, popup="我", icon=folium.Icon(color="blue", icon="user")).add_to(m)
     
     nearest_key = None
     min_dist = float("inf")
@@ -142,21 +135,8 @@ if loc:
         spot_pos = (info["lat"], info["lon"])
         d = geodesic(user_pos, spot_pos).meters
         
-        # 紅色點：景點
-        folium.Marker(
-            spot_pos, 
-            popup=f"{info['name']} ({int(d)}m)", 
-            icon=folium.Icon(color="red", icon="info-sign")
-        ).add_to(m)
-        
-        # 紅色圈：觸發範圍
-        folium.Circle(
-            spot_pos, 
-            radius=TRIGGER_DIST, 
-            color="red", 
-            fill=True, 
-            fill_opacity=0.1
-        ).add_to(m)
+        folium.Marker(spot_pos, popup=f"{info['name']} ({int(d)}m)", icon=folium.Icon(color="red", icon="info-sign")).add_to(m)
+        folium.Circle(spot_pos, radius=TRIGGER_DIST, color="red", fill=True, fill_opacity=0.1).add_to(m)
         
         if d < min_dist:
             min_dist = d
@@ -196,4 +176,4 @@ if loc:
         st.info(f"🚶 前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
 
 else:
-    st.warning("📡 正在取得 GPS 定位... (每 3 秒更新)")
+    st.warning("📡 正在取得 GPS 定位... (請等待數秒)")
