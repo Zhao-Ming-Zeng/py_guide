@@ -22,7 +22,7 @@ from langchain_core.runnables import RunnablePassthrough
 st.set_page_config(page_title="虎科大 IoT 語音導覽", layout="wide")
 
 # --------------------------------------------------
-# 2. CSS 樣式 (極簡化)
+# 2. CSS 樣式 (極簡風格)
 # --------------------------------------------------
 st.markdown("""
 <style>
@@ -57,7 +57,7 @@ if 'mqtt_action' not in st.session_state: st.session_state.mqtt_action = None
 if 'last_mqtt_time' not in st.session_state: st.session_state.last_mqtt_time = 0.0
 
 # ==========================================================
-# 5. MQTT 雲端共享核心
+# 5. MQTT 雲端共享核心 (解決多人接收 + 雲端環境)
 # ==========================================================
 class MqttSharedState:
     def __init__(self):
@@ -83,6 +83,7 @@ def start_mqtt_listener():
     def on_message(client, userdata, msg):
         try:
             payload = msg.payload.decode()
+            # 更新共享記憶體
             shared_state.last_cmd = payload
             shared_state.timestamp = time.time()
         except: pass
@@ -104,8 +105,8 @@ start_mqtt_listener()
 # --------------------------------------------------
 @st.cache_resource
 def load_rag():
-    if not os.path.exists("faiss_index"): return "請上傳 faiss_index 資料夾"
-    if "GOOGLE_API_KEY" not in st.secrets: return "請設定 GOOGLE_API_KEY Secrets"
+    if not os.path.exists("faiss_index"): return "請上傳 faiss_index"
+    if "GOOGLE_API_KEY" not in st.secrets: return "請設定 Secrets"
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
         db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
@@ -126,36 +127,42 @@ def play_audio_hidden(path):
     st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================================
-# 8. 背景監聽與 GPS 核心 (自動定位版)
+# 8. 背景監聽與 GPS 核心 (通用相容版)
 # ==========================================================
+# run_every=5 保持流暢
 @st.fragment(run_every=5)
 def background_worker():
     # --- A. 檢查 MQTT ---
     shared = get_shared_state()
     new_cmd = None
-    if shared.timestamp > st.session_state.last_mqtt_time:
-        new_cmd = shared.last_cmd
-        st.session_state.last_mqtt_time = shared.timestamp
+    try:
+        if shared.timestamp > st.session_state.last_mqtt_time:
+            new_cmd = shared.last_cmd
+            st.session_state.last_mqtt_time = shared.timestamp
+    except: pass
 
-    # --- B. 檢查 GPS (Android 強制開啟高精度) ---
+    # --- B. 檢查 GPS (關鍵修正：通用設定) ---
     loc = None
     try:
+        # enable_high_accuracy=False -> 讓電腦可用 WiFi，手機可用快速定位
+        # maximum_age=10000 -> 允許使用 10 秒內的舊位置 (防閃爍、防卡死)
+        # timeout=5000 -> 5秒沒抓到就跳過
         loc = get_geolocation(
             component_key=f"gps_{int(time.time())}",
-            enable_high_accuracy=True, 
-            timeout=4000,
-            maximum_age=0
+            enable_high_accuracy=False, 
+            timeout=5000,
+            maximum_age=10000
         )
     except:
         loc = None
 
-    # 狀態顯示 (極簡文字)
+    # 狀態顯示 (極簡)
     status = []
-    if loc: status.append("▶ GPS 已連線") 
-    else: status.append("搜尋衛星中...")
+    if loc: status.append("▶ GPS 連線中") 
+    else: status.append("定位中...")
     
     if new_cmd: 
-        status.append(f"收到指令: {new_cmd}")
+        status.append(f"接收: {new_cmd}")
         st.toast(f"廣播: {new_cmd}")
         
     st.caption(" | ".join(status))
@@ -163,21 +170,25 @@ def background_worker():
     # --- C. 刷新邏輯 ---
     should_rerun = False
     
+    # 1. MQTT 觸發
     if new_cmd:
         st.session_state.mqtt_action = new_cmd
         should_rerun = True
 
+    # 2. GPS 移動觸發
     if loc:
-        new_pos = (loc["coords"]["latitude"], loc["coords"]["longitude"])
-        old_pos = st.session_state.user_coords
-        
-        if old_pos is None:
-            st.session_state.user_coords = new_pos
-            should_rerun = True
-        else:
-            if geodesic(old_pos, new_pos).meters > MOVE_THRESHOLD:
+        try:
+            new_pos = (loc["coords"]["latitude"], loc["coords"]["longitude"])
+            old_pos = st.session_state.user_coords
+            
+            if old_pos is None:
                 st.session_state.user_coords = new_pos
                 should_rerun = True
+            else:
+                if geodesic(old_pos, new_pos).meters > MOVE_THRESHOLD:
+                    st.session_state.user_coords = new_pos
+                    should_rerun = True
+        except: pass
                 
     if should_rerun:
         st.rerun()
@@ -189,7 +200,7 @@ st.title("虎科大 IoT 語音導覽")
 
 with st.sidebar:
     st.header("系統狀態")
-    # 自動執行，不需手動按鈕
+    # 自動執行背景工作
     background_worker()
     st.divider()
     st.caption(f"Topic: {MQTT_TOPIC}")
@@ -263,11 +274,11 @@ with col_info:
             else:
                 with st.chat_message("user"): st.write(user_q)
                 with st.chat_message("assistant"):
-                    with st.spinner("思考中..."):
+                    with st.spinner("AI 思考中..."):
                         resp = qa_chain_or_error.invoke(f"我現在在「{spot['name']}」，{user_q}")
                         st.write(resp)
     elif st.session_state.user_coords:
         if nearest_key: st.info(f"距離 {SPOTS[nearest_key]['name']} 還有 {int(min_dist - TRIGGER_DIST)} 公尺")
     else:
-        st.warning("正在搜尋衛星訊號...")
-        st.caption("若卡住太久，請重新整理網頁")
+        st.warning("正在定位中...")
+        st.caption("請允許瀏覽器位置權限")
