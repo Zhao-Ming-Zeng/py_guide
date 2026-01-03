@@ -17,7 +17,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 
 # --- 1. 設定頁面 ---
-st.set_page_config(page_title="語音導覽", layout="wide", page_icon="🗺️")
+st.set_page_config(page_title="虎科大 IoT 智慧導覽", layout="wide", page_icon="🏫")
 
 # --- 2. CSS 樣式 ---
 st.markdown("""
@@ -27,15 +27,16 @@ st.markdown("""
     
     /* 美化播放按鈕 */
     .stButton button {
-        background-color: #E63946; color: white; border-radius: 50px;
+        background-color: #0055A4; /* 虎科藍 */
+        color: white; border-radius: 50px;
         font-size: 18px; border: none;
         box-shadow: 0px 4px 6px rgba(0,0,0,0.2);
         width: 100%; padding: 10px;
     }
-    .stButton button:hover { background-color: #D62828; }
+    .stButton button:hover { background-color: #003366; transform: scale(1.02); }
     
     /* 讓地圖容器更好看 */
-    iframe { border-radius: 10px; border: 2px solid #eee; }
+    iframe { border-radius: 12px; border: 2px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -45,41 +46,46 @@ if not os.path.exists("data/spots.json"):
     st.stop()
 SPOTS = json.load(open("data/spots.json", "r", encoding="utf-8"))
 
-TRIGGER_DIST = 150 # 觸發半徑
-MOVE_THRESHOLD = 10 # ⚠️ 移動超過 10 公尺才更新地圖 (防閃爍核心)
+# 固定參數 (未修改)
+TRIGGER_DIST = 150 
+MOVE_THRESHOLD = 10 
 
 # --- 4. 初始化 Session State ---
 if 'user_coords' not in st.session_state:
-    st.session_state.user_coords = None # 存經緯度
+    st.session_state.user_coords = None
 if 'current_spot' not in st.session_state:
-    st.session_state.current_spot = None # 存目前景點
+    st.session_state.current_spot = None
 if 'mqtt_action' not in st.session_state:
-    st.session_state.mqtt_action = None # 存 MQTT 指令
+    st.session_state.mqtt_action = None
 
 # ==========================================================
-# 📡 MQTT 設定 (新增區塊)
+# 📡 MQTT 設定 (已修正為 V2 API 以消除警告)
 # ==========================================================
 MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 1883
+MQTT_PORT = 1883           # Python 端必須用 1883 (TCP)
 MQTT_TOPIC = "nfu/tour/control"
 
 @st.cache_resource
 def start_mqtt_listener():
-    def on_connect(client, userdata, flags, rc):
-        print(f"MQTT 連線成功 (Code: {rc})")
+    """啟動背景 MQTT 監聽"""
+    
+    # V2 API 的 on_connect 必須包含 properties 參數
+    def on_connect(client, userdata, flags, rc, properties=None):
+        print(f"📡 MQTT 連線成功 (Code: {rc})")
         client.subscribe(MQTT_TOPIC)
 
     def on_message(client, userdata, msg):
         try:
             payload = msg.payload.decode()
-            print(f"收到指令: {payload}")
+            print(f"📥 收到指令: {payload}")
             # 寫入檔案作為跨執行緒溝通
             with open("mqtt_inbox.txt", "w", encoding="utf-8") as f:
                 f.write(payload)
         except Exception as e:
             print(f"MQTT 錯誤: {e}")
 
-    client = mqtt.Client()
+    # 明確指定使用 VERSION2，解決 DeprecationWarning
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_connect = on_connect
     client.on_message = on_message
     
@@ -101,8 +107,13 @@ def load_rag():
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
         db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        # 設定為 2.5 Flash
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=st.secrets["GOOGLE_API_KEY"])
+        
+        # 指定使用 gemini-2.5-flash
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            temperature=0.3, 
+            google_api_key=st.secrets["GOOGLE_API_KEY"]
+        )
         prompt = PromptTemplate.from_template("背景:{context}\n問題:{question}\n回答:")
         return ({"context": db.as_retriever(search_kwargs={"k": 2}), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser())
     except Exception as e: return str(e)
@@ -122,11 +133,11 @@ def play_audio_hidden(path):
     st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================================
-# 🌟 後臺 GPS 與 MQTT 監聽器
+# 🌟 後臺監聽器 (GPS + MQTT + 防閃爍)
 # ==========================================================
 @st.fragment(run_every=3)
-def background_gps_worker():
-    # --- A. 檢查 MQTT 指令 ---
+def background_worker():
+    # --- A. 檢查 MQTT ---
     mqtt_cmd = None
     if os.path.exists("mqtt_inbox.txt"):
         try:
@@ -136,34 +147,32 @@ def background_gps_worker():
         except: pass
 
     # --- B. 檢查 GPS ---
-    # 用時間戳當 ID，強制瀏覽器抓新位置
     gps_id = f"gps_{int(time.time())}"
-    
     try:
-        # 這裡只會在這個小區塊顯示一個隱形的 div，不影響主畫面
         loc = get_geolocation(component_key=gps_id)
     except:
         loc = None
     
-    # 顯示狀態
+    # 狀態顯示 (除錯用)
     status_msg = []
-    if loc: status_msg.append("訊號接收中...")
-    else: status_msg.append("搜尋訊號中...")
-
+    if loc: status_msg.append("🟢 GPS")
+    else: status_msg.append("🔴 GPS")
+    
     if mqtt_cmd:
-        status_msg.append(f"收到指令: {mqtt_cmd}")
+        status_msg.append(f"⚡ IoT: {mqtt_cmd}")
+        st.toast(f"收到指令: {mqtt_cmd}", icon="📡")
+    
+    st.caption(" | ".join(status_msg))
 
-    st.caption(" | ".join(status_msg) + f" ({int(time.time())%100})")
+    # --- C. 判斷是否更新主畫面 ---
+    should_rerun = False
 
-    # --- C. 判斷是否需要更新主畫面 ---
-    should_update = False
-
-    # 1. 收到 MQTT 指令 -> 強制更新
+    # 1. IoT 指令優先
     if mqtt_cmd:
         st.session_state.mqtt_action = mqtt_cmd
-        should_update = True
+        should_rerun = True
 
-    # 2. GPS 移動判斷
+    # 2. GPS 移動門檻
     if loc:
         new_lat = loc["coords"]["latitude"]
         new_lon = loc["coords"]["longitude"]
@@ -172,78 +181,71 @@ def background_gps_worker():
         old_pos = st.session_state.user_coords
         
         if old_pos is None:
-            # 第一次抓到，一定要更新
             st.session_state.user_coords = new_pos
-            should_update = True
+            should_rerun = True
         else:
-            # 計算移動距離
             dist = geodesic(old_pos, new_pos).meters
-            # ⚠️ 只有移動距離大於門檻值 (例如 10公尺)，才觸發更新
             if dist > MOVE_THRESHOLD:
                 st.session_state.user_coords = new_pos
-                should_update = True
+                should_rerun = True
         
-    if should_update:
-        # 只有在這裡，才強制主畫面刷新。
+    if should_rerun:
         st.rerun()
 
 # ==========================================================
-# 主介面 (Main UI)
+# 主介面
 # ==========================================================
 st.title("虎科大隨身語音導覽")
 
-# 1. 啟動後臺 GPS 工人
+# Sidebar
 with st.sidebar:
     st.header("系統狀態")
-    background_gps_worker()
+    background_worker() # 啟動背景工人
     st.info("說明：為了節省流量並穩定畫面，只有當您移動超過 10 公尺時，地圖才會更新。")
     st.markdown(f"MQTT Topic: `{MQTT_TOPIC}`")
+    st.caption("Web Client Port: 8000")
 
-# --- 處理 MQTT 指令 (新增邏輯) ---
+# --- 處理 MQTT 動作 ---
 if st.session_state.mqtt_action:
     cmd = st.session_state.mqtt_action
     
     if cmd == "sos":
-        st.error("【緊急廣播】 請依照指示疏散！")
+        st.error("🚨 【緊急廣播】 校園安全演練，請依照指示行動！")
         play_audio_hidden("data/audio/alert.mp3")
     elif cmd == "welcome":
         st.balloons()
-        st.success("歡迎蒞臨虎尾科技大學！")
+        st.success("👋 歡迎蒞臨國立虎尾科技大學！")
     
     st.session_state.mqtt_action = None
 
-# 2. 處理位置與地圖
 col_map, col_info = st.columns([3, 2])
 
+# --- 地圖區 ---
 with col_map:
-    # 決定地圖中心
+    # 虎科大預設座標 (您指定的數值)
+    default_nfu_pos = (23.7027602462213, 120.42951632350216)
+    
     if st.session_state.user_coords:
         center_pos = st.session_state.user_coords
         zoom = 17
     else:
-        # 您指定的預設座標
-        center_pos = (23.7027602462213, 120.42951632350216)
+        center_pos = default_nfu_pos
         zoom = 15
 
     m = folium.Map(location=center_pos, zoom_start=zoom)
     
-    # 畫自己
     if st.session_state.user_coords:
         folium.Marker(st.session_state.user_coords, popup="我", icon=folium.Icon(color="blue", icon="user")).add_to(m)
     
-    # 畫景點
     nearest_key = None
     min_dist = float("inf")
     
     for key, info in SPOTS.items():
         spot_pos = (info["lat"], info["lon"])
-        
-        # 計算距離
         d = 99999
         if st.session_state.user_coords:
             d = geodesic(st.session_state.user_coords, spot_pos).meters
         
-        # 標記
         folium.Marker(spot_pos, popup=f"{info['name']} ({int(d)}m)", icon=folium.Icon(color="red", icon="info-sign")).add_to(m)
         folium.Circle(spot_pos, radius=TRIGGER_DIST, color="red", fill=True, fill_opacity=0.1).add_to(m)
         
@@ -253,23 +255,19 @@ with col_map:
 
     st_folium(m, width="100%", height=400)
 
-# 3. 處理資訊面板
+# --- 資訊區 ---
 with col_info:
-    # 判斷是否抵達
     if st.session_state.user_coords and nearest_key and min_dist <= TRIGGER_DIST:
         spot = SPOTS[nearest_key]
-        
-        # 更新目前景點狀態
         st.session_state.current_spot = nearest_key
         
-        st.success(f"您已抵達：{spot['name']}")
+        st.success(f"📍 您已抵達：{spot['name']}")
         
         lang = st.radio("導覽語言", ["中文", "台語"], horizontal=True)
         intro = spot["intro_cn"] if lang == "中文" else spot.get("intro_tw", "無資料")
         
-        st.markdown(f"<div style='background:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:10px'>{intro}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='background:#f9f9f9; padding:15px; border-radius:10px; margin-bottom:10px; color:#333'>{intro}</div>", unsafe_allow_html=True)
         
-        # 播放按鈕
         if st.button("▶ 播放導覽語音"):
             suffix = "cn" if lang == "中文" else "tw"
             path = f"data/audio/{nearest_key}_{suffix}.mp3"
@@ -279,27 +277,25 @@ with col_info:
             
         st.divider()
         
-        # AI 聊天
-        st.markdown("### 導覽小幫手")
+        st.markdown("### 🤖 虎科小幫手")
         user_q = st.chat_input("有什麼問題嗎？")
         
         if user_q:
             if isinstance(qa_chain_or_error, str):
                 st.error(qa_chain_or_error)
             else:
-                with st.chat_message("user"):
-                    st.write(user_q)
+                with st.chat_message("user"): st.write(user_q)
                 with st.chat_message("assistant"):
-                    with st.spinner("思考中..."):
+                    with st.spinner("Gemini 2.5 Flash 思考中..."):
                         full_q = f"我現在在「{spot['name']}」，{user_q}"
                         resp = qa_chain_or_error.invoke(full_q)
                         st.write(resp)
                         
     elif st.session_state.user_coords:
         if nearest_key:
-            st.info(f"前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
+            st.info(f"🚶 前往最近景點：{SPOTS[nearest_key]['name']} (還有 {int(min_dist - TRIGGER_DIST)}m)")
         else:
             st.info("附近沒有景點")
     else:
-        st.warning("正在等待 GPS 訊號...")
+        st.warning("📡 正在等待 GPS 訊號...")
         st.markdown("請確認您已開啟手機 GPS，並允许瀏覽器存取位置。")
