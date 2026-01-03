@@ -204,11 +204,7 @@ with st.sidebar:
     
     # 2. 獲取 GPS (關鍵修正：放在主線程，不使用變動 Key)
     # enableHighAccuracy=True 對 Android 非常重要
-    loc = get_geolocation(
-        enableHighAccuracy=True, 
-        timeout=10000, 
-        maximumAge=0
-    )
+    loc = get_geolocation()
 
 # 3. 處理 GPS 數據
 if loc and "coords" in loc:
