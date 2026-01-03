@@ -4,6 +4,8 @@ import os
 import base64
 import time
 import folium
+import threading
+import paho.mqtt.client as mqtt
 from streamlit_folium import st_folium
 from streamlit_js_eval import get_geolocation
 from geopy.distance import geodesic
@@ -17,7 +19,7 @@ from langchain_core.runnables import RunnablePassthrough
 # --- 1. 設定頁面 ---
 st.set_page_config(page_title="語音導覽", layout="wide", page_icon="🗺️")
 
-# --- 2. CSS 樣式 (隱藏播放器、美化介面) ---
+# --- 2. CSS 樣式 ---
 st.markdown("""
 <style>
     /* 隱藏預設的 audio 元素 */
@@ -42,6 +44,7 @@ if not os.path.exists("data/spots.json"):
     st.error("❌ 找不到 data/spots.json")
     st.stop()
 SPOTS = json.load(open("data/spots.json", "r", encoding="utf-8"))
+
 TRIGGER_DIST = 150 # 觸發半徑
 MOVE_THRESHOLD = 10 # ⚠️ 移動超過 10 公尺才更新地圖 (防閃爍核心)
 
@@ -50,6 +53,45 @@ if 'user_coords' not in st.session_state:
     st.session_state.user_coords = None # 存經緯度
 if 'current_spot' not in st.session_state:
     st.session_state.current_spot = None # 存目前景點
+if 'mqtt_action' not in st.session_state:
+    st.session_state.mqtt_action = None # 存 MQTT 指令
+
+# ==========================================================
+# 📡 MQTT 設定 (新增區塊)
+# ==========================================================
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 2026
+MQTT_TOPIC = "nfu/tour/control"
+
+@st.cache_resource
+def start_mqtt_listener():
+    def on_connect(client, userdata, flags, rc):
+        print(f"MQTT 連線成功 (Code: {rc})")
+        client.subscribe(MQTT_TOPIC)
+
+    def on_message(client, userdata, msg):
+        try:
+            payload = msg.payload.decode()
+            print(f"收到指令: {payload}")
+            # 寫入檔案作為跨執行緒溝通
+            with open("mqtt_inbox.txt", "w", encoding="utf-8") as f:
+                f.write(payload)
+        except Exception as e:
+            print(f"MQTT 錯誤: {e}")
+
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+    except:
+        pass
+    return client
+
+# 啟動 MQTT
+start_mqtt_listener()
 
 # --- 5. RAG 模型 ---
 @st.cache_resource
@@ -59,7 +101,7 @@ def load_rag():
     try:
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
         db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-        # 設定為 2.5 Flash (或您的可用模型)
+        # 設定為 2.5 Flash
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3, google_api_key=st.secrets["GOOGLE_API_KEY"])
         prompt = PromptTemplate.from_template("背景:{context}\n問題:{question}\n回答:")
         return ({"context": db.as_retriever(search_kwargs={"k": 2}), "question": RunnablePassthrough()} | prompt | llm | StrOutputParser())
@@ -80,11 +122,20 @@ def play_audio_hidden(path):
     st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================================
-# 🌟 後臺 GPS 監聽器 (核心技術)
+# 🌟 後臺 GPS 與 MQTT 監聽器
 # ==========================================================
-# 這個 fragment 會在背景每 3 秒跑一次，但「不會」刷新主頁面
 @st.fragment(run_every=3)
 def background_gps_worker():
+    # --- A. 檢查 MQTT 指令 ---
+    mqtt_cmd = None
+    if os.path.exists("mqtt_inbox.txt"):
+        try:
+            with open("mqtt_inbox.txt", "r", encoding="utf-8") as f:
+                mqtt_cmd = f.read().strip()
+            os.remove("mqtt_inbox.txt")
+        except: pass
+
+    # --- B. 檢查 GPS ---
     # 用時間戳當 ID，強制瀏覽器抓新位置
     gps_id = f"gps_{int(time.time())}"
     
@@ -94,13 +145,25 @@ def background_gps_worker():
     except:
         loc = None
     
-    # 顯示一個極小的狀態點，讓你知道程式還活著 (可選)
-    if loc:
-        st.caption(f"訊號接收中... ({int(time.time())%100})")
-    else:
-        st.caption("搜尋訊號中...")
+    # 顯示狀態
+    status_msg = []
+    if loc: status_msg.append("訊號接收中...")
+    else: status_msg.append("搜尋訊號中...")
 
-    # 2. 判斷是否需要更新主畫面
+    if mqtt_cmd:
+        status_msg.append(f"收到指令: {mqtt_cmd}")
+
+    st.caption(" | ".join(status_msg) + f" ({int(time.time())%100})")
+
+    # --- C. 判斷是否需要更新主畫面 ---
+    should_update = False
+
+    # 1. 收到 MQTT 指令 -> 強制更新
+    if mqtt_cmd:
+        st.session_state.mqtt_action = mqtt_cmd
+        should_update = True
+
+    # 2. GPS 移動判斷
     if loc:
         new_lat = loc["coords"]["latitude"]
         new_lon = loc["coords"]["longitude"]
@@ -108,34 +171,46 @@ def background_gps_worker():
         
         old_pos = st.session_state.user_coords
         
-        should_update = False
-        
         if old_pos is None:
             # 第一次抓到，一定要更新
+            st.session_state.user_coords = new_pos
             should_update = True
         else:
             # 計算移動距離
             dist = geodesic(old_pos, new_pos).meters
             # ⚠️ 只有移動距離大於門檻值 (例如 10公尺)，才觸發更新
             if dist > MOVE_THRESHOLD:
+                st.session_state.user_coords = new_pos
                 should_update = True
         
-        if should_update:
-            st.session_state.user_coords = new_pos
-            # 只有在這裡，才強制主畫面刷新。
-            # 如果你站著不動，這行永遠不會執行，地圖就永遠不會閃！
-            st.rerun()
+    if should_update:
+        # 只有在這裡，才強制主畫面刷新。
+        st.rerun()
 
 # ==========================================================
 # 主介面 (Main UI)
 # ==========================================================
 st.title("虎科大隨身語音導覽")
 
-# 1. 啟動後臺 GPS 工人 (放在側邊欄或頁面頂端，不佔空間)
+# 1. 啟動後臺 GPS 工人
 with st.sidebar:
     st.header("系統狀態")
     background_gps_worker()
     st.info("說明：為了節省流量並穩定畫面，只有當您移動超過 10 公尺時，地圖才會更新。")
+    st.markdown(f"MQTT Topic: `{MQTT_TOPIC}`")
+
+# --- 處理 MQTT 指令 (新增邏輯) ---
+if st.session_state.mqtt_action:
+    cmd = st.session_state.mqtt_action
+    
+    if cmd == "sos":
+        st.error("【緊急廣播】 請依照指示疏散！")
+        play_audio_hidden("data/audio/alert.mp3")
+    elif cmd == "welcome":
+        st.balloons()
+        st.success("歡迎蒞臨虎尾科技大學！")
+    
+    st.session_state.mqtt_action = None
 
 # 2. 處理位置與地圖
 col_map, col_info = st.columns([3, 2])
@@ -146,7 +221,8 @@ with col_map:
         center_pos = st.session_state.user_coords
         zoom = 17
     else:
-        center_pos = (23.7027602462213, 120.42951632350216) # 預設虎科大
+        # 您指定的預設座標
+        center_pos = (23.7027602462213, 120.42951632350216)
         zoom = 15
 
     m = folium.Map(location=center_pos, zoom_start=zoom)
@@ -177,7 +253,7 @@ with col_map:
 
     st_folium(m, width="100%", height=400)
 
-# 3. 處理資訊面板 (這裡完全靜止，除非上面觸發 rerun)
+# 3. 處理資訊面板
 with col_info:
     # 判斷是否抵達
     if st.session_state.user_coords and nearest_key and min_dist <= TRIGGER_DIST:
