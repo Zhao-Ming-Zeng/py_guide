@@ -66,15 +66,12 @@ if "current_spot" not in st.session_state:
 if "mqtt_action" not in st.session_state:
     st.session_state.mqtt_action = None
 
-if "gps_enabled" not in st.session_state:
-    st.session_state.gps_enabled = False
-
 # 🌟 新增：紀錄用戶上次收到廣播的時間 (解決多人接收問題)
 if "last_mqtt_time" not in st.session_state:
     st.session_state.last_mqtt_time = 0.0
 
 # --------------------------------------------------
-# MQTT (修改為 JSON 廣播模式)
+# MQTT (修改為 JSON 廣播模式，多人接收)
 # --------------------------------------------------
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
@@ -90,7 +87,7 @@ def start_mqtt_listener():
     def on_message(client, userdata, msg):
         try:
             payload = msg.payload.decode()
-            # 🌟 修改點：寫入指令 + 時間戳記 (不刪除舊檔，直接覆蓋)
+            # 🌟 寫入指令 + 時間戳記 (不刪除舊檔，直接覆蓋)
             data = {
                 "cmd": payload,
                 "timestamp": time.time()
@@ -174,12 +171,12 @@ def play_audio_hidden(path):
     st.markdown(html, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# Background worker (修改讀取邏輯)
+# Background worker (自動定位 + 多人廣播)
 # --------------------------------------------------
-@st.fragment(run_every=3)
+@st.fragment(run_every=5)  # 5秒刷新一次，給手機一點緩衝
 def background_worker():
 
-    # 🌟 修改點：改為讀取 JSON 並比對時間
+    # 1. 檢查 MQTT (比對時間戳記)
     mqtt_cmd = None
     if os.path.exists(MQTT_FILE):
         try:
@@ -189,22 +186,27 @@ def background_worker():
             server_time = data.get("timestamp", 0)
             cmd = data.get("cmd", "")
 
-            # 如果檔案時間 > 我上次紀錄的時間，代表是新訊息
+            # 只有當檔案時間 > 我記憶的時間，才執行
             if server_time > st.session_state.last_mqtt_time:
                 mqtt_cmd = cmd
-                # 更新我的記憶時間，但不刪除檔案
                 st.session_state.last_mqtt_time = server_time
         except:
             pass
 
-    # --- 以下保持您原本的 GPS 邏輯 ---
+    # 2. 自動取得 GPS (不需按鈕，且參數調整為通吃模式)
     loc = None
-    if st.session_state.gps_enabled:
-        try:
-            gps_id = f"gps_{int(time.time())}"
-            loc = get_geolocation(component_key=gps_id)
-        except:
-            loc = None
+    try:
+        # 🌟 關鍵修正參數：
+        # enable_high_accuracy=False: 讓電腦(WiFi)能抓到，手機也不會卡死
+        # maximum_age=10000: 允許使用 10 秒內的舊位置，防閃爍
+        loc = get_geolocation(
+            component_key=f"gps_{int(time.time())}",
+            enable_high_accuracy=False,
+            timeout=5000,
+            maximum_age=10000
+        )
+    except:
+        loc = None
 
     should_rerun = False
 
@@ -240,22 +242,14 @@ st.title("虎科大隨身語音導覽")
 with st.sidebar:
     st.header("系統狀態")
 
-    if not st.session_state.gps_enabled:
-        if st.button("啟用定位"):
-            loc = get_geolocation()
-            if loc:
-                st.session_state.user_coords = (
-                    loc["coords"]["latitude"],
-                    loc["coords"]["longitude"]
-                )
-                st.session_state.gps_enabled = True
-                st.success("定位啟用完成")
-            else:
-                st.error("無法取得定位")
+    # 🌟 修改：移除「啟用定位」按鈕，改為「重抓 GPS」作為備用
+    # 這樣一進入網頁就會自動開始抓，但如果卡住，用戶可以按這個
+    if st.button("🔄 重抓 GPS"):
+        st.rerun()
 
-    background_worker()
+    background_worker() # 自動在背景執行，不需條件
 
-    st.info("位置更新需移動超過 10 公尺")
+    st.info("說明：系統會自動定位。若位置未更新，請確認瀏覽器權限或點擊上方重抓按鈕。")
     st.markdown(f"MQTT Topic: {MQTT_TOPIC}")
 
 # --------------------------------------------------
@@ -265,15 +259,17 @@ if st.session_state.mqtt_action:
     cmd = st.session_state.mqtt_action
 
     if cmd == "sos":
-        st.error("緊急廣播")
+        st.error("【緊急廣播】 校園安全演練，請依照指示行動！")
         play_audio_hidden("data/audio/alert.mp3")
         time.sleep(10)
 
     elif cmd == "welcome":
+        st.balloons()
         st.success("歡迎蒞臨國立虎尾科技大學")
         time.sleep(5)
 
     st.session_state.mqtt_action = None
+    st.rerun() # 執行完後刷新，清除狀態
 
 # --------------------------------------------------
 # Layout
@@ -379,4 +375,5 @@ with col_info:
         else:
             st.info("附近沒有景點")
     else:
-        st.warning("等待 GPS 定位")
+        st.warning("正在定位中...")
+        st.caption("請允許瀏覽器存取位置權限")
