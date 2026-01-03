@@ -212,9 +212,11 @@ if st.session_state.mqtt_action:
     if cmd == "sos":
         st.error("🚨 【緊急廣播】 校園安全演練，請依照指示行動！")
         play_audio_hidden("data/audio/alert.mp3")
+        time.sleep(10)
     elif cmd == "welcome":
         st.balloons()
         st.success("👋 歡迎蒞臨國立虎尾科技大學！")
+        time.sleep(5)
     
     st.session_state.mqtt_action = None
 
