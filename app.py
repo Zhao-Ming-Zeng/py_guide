@@ -60,7 +60,7 @@ if 'mqtt_action' not in st.session_state:
 # 📡 MQTT 設定 (新增區塊)
 # ==========================================================
 MQTT_BROKER = "broker.hivemq.com"
-MQTT_PORT = 2026
+MQTT_PORT = 1883
 MQTT_TOPIC = "nfu/tour/control"
 
 @st.cache_resource
