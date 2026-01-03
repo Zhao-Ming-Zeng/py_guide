@@ -17,7 +17,7 @@ from langchain_core.runnables import RunnablePassthrough
 # --------------------------------------------------
 # Page config
 # --------------------------------------------------
-st.set_page_config(page_title="虎科大 IoT 智慧導覽", layout="wide")
+st.set_page_config(page_title="虎科大智慧導覽", layout="wide")
 
 # --------------------------------------------------
 # CSS (優化手機版顯示)
@@ -194,7 +194,7 @@ def background_worker():
 # 主程式邏輯
 # --------------------------------------------------
 
-st.title("虎科大 IoT 智慧導覽")
+st.title("虎科大智慧導覽")
 
 # 1. 啟動背景計時器 (放在 Sidebar 以免影響排版)
 with st.sidebar:
@@ -318,7 +318,7 @@ with col_info:
             st.session_state.current_spot = nearest_key
             st.toast(f"已抵達：{spot['name']}")
 
-        st.success(f"📍 您在：{spot['name']}")
+        st.success(f"您在：{spot['name']}")
         
         lang = st.radio("導覽語言", ["中文", "台語"], horizontal=True, key="lang_select")
         
@@ -337,7 +337,7 @@ with col_info:
             st.rerun()
 
         st.divider()
-        st.markdown("🤖 **虎科小幫手**")
+        st.markdown("**虎科小幫手**")
         
         user_q = st.chat_input("關於這裡的問題...")
         if user_q:
