@@ -66,28 +66,26 @@ if "current_spot" not in st.session_state:
 if "mqtt_action" not in st.session_state:
     st.session_state.mqtt_action = None
 
-# 🌟 新增：紀錄用戶上次收到廣播的時間 (解決多人接收問題)
+# MQTT 多人接收修正
 if "last_mqtt_time" not in st.session_state:
     st.session_state.last_mqtt_time = 0.0
 
 # --------------------------------------------------
-# MQTT (修改為 JSON 廣播模式，多人接收)
+# MQTT (JSON 廣播模式)
 # --------------------------------------------------
 MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC = "nfu/tour/control"
-MQTT_FILE = "mqtt_broadcast.json"  # 改用 JSON 檔案
+MQTT_FILE = "mqtt_broadcast.json"
 
 @st.cache_resource
 def start_mqtt_listener():
-
     def on_connect(client, userdata, flags, rc, properties=None):
         client.subscribe(MQTT_TOPIC)
 
     def on_message(client, userdata, msg):
         try:
             payload = msg.payload.decode()
-            # 🌟 寫入指令 + 時間戳記 (不刪除舊檔，直接覆蓋)
             data = {
                 "cmd": payload,
                 "timestamp": time.time()
@@ -171,12 +169,12 @@ def play_audio_hidden(path):
     st.markdown(html, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# Background worker (自動定位 + 多人廣播)
+# Background worker
 # --------------------------------------------------
-@st.fragment(run_every=5)  # 5秒刷新一次，給手機一點緩衝
+@st.fragment(run_every=3) # 改回原本的 3 秒
 def background_worker():
 
-    # 1. 檢查 MQTT (比對時間戳記)
+    # 1. MQTT 檢查
     mqtt_cmd = None
     if os.path.exists(MQTT_FILE):
         try:
@@ -186,25 +184,18 @@ def background_worker():
             server_time = data.get("timestamp", 0)
             cmd = data.get("cmd", "")
 
-            # 只有當檔案時間 > 我記憶的時間，才執行
             if server_time > st.session_state.last_mqtt_time:
                 mqtt_cmd = cmd
                 st.session_state.last_mqtt_time = server_time
         except:
             pass
 
-    # 2. 自動取得 GPS (不需按鈕，且參數調整為通吃模式)
+    # 2. GPS 檢查 (完全改回最原始版本，不帶任何參數)
     loc = None
     try:
-        # 🌟 關鍵修正參數：
-        # enable_high_accuracy=False: 讓電腦(WiFi)能抓到，手機也不會卡死
-        # maximum_age=10000: 允許使用 10 秒內的舊位置，防閃爍
-        loc = get_geolocation(
-            component_key=f"gps_{int(time.time())}",
-            enable_high_accuracy=False,
-            timeout=5000,
-            maximum_age=10000
-        )
+        gps_id = f"gps_{int(time.time())}"
+        # ⚠️ 這裡改回了最單純的呼叫，這就是您說電腦可以秒抓的狀態
+        loc = get_geolocation(component_key=gps_id)
     except:
         loc = None
 
@@ -242,14 +233,14 @@ st.title("虎科大隨身語音導覽")
 with st.sidebar:
     st.header("系統狀態")
 
-    # 🌟 修改：移除「啟用定位」按鈕，改為「重抓 GPS」作為備用
-    # 這樣一進入網頁就會自動開始抓，但如果卡住，用戶可以按這個
-    if st.button("🔄 重抓 GPS"):
+    # 保留手動按鈕以備不時之需，但不需要先按它才能跑
+    if st.button("🔄 重抓位置"):
         st.rerun()
 
-    background_worker() # 自動在背景執行，不需條件
+    # 自動執行，不需啟用按鈕
+    background_worker()
 
-    st.info("說明：系統會自動定位。若位置未更新，請確認瀏覽器權限或點擊上方重抓按鈕。")
+    st.info("系統正在自動定位中")
     st.markdown(f"MQTT Topic: {MQTT_TOPIC}")
 
 # --------------------------------------------------
@@ -269,7 +260,7 @@ if st.session_state.mqtt_action:
         time.sleep(5)
 
     st.session_state.mqtt_action = None
-    st.rerun() # 執行完後刷新，清除狀態
+    st.rerun()
 
 # --------------------------------------------------
 # Layout
@@ -375,5 +366,4 @@ with col_info:
         else:
             st.info("附近沒有景點")
     else:
-        st.warning("正在定位中...")
-        st.caption("請允許瀏覽器存取位置權限")
+        st.warning("等待 GPS 定位")
